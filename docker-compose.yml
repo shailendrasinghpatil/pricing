@@ -1,0 +1,83 @@
+services:
+  # ─── PostgreSQL Database ─────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: pricing
+      POSTGRES_USER: pricing
+      POSTGRES_PASSWORD: pricing
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pricing"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ─── Keycloak Identity Provider ──────────────────────────────
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    restart: unless-stopped
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      # Use localhost:8080 as the public hostname so JWT `iss` matches
+      KC_HOSTNAME: localhost
+      KC_HOSTNAME_PORT: "8080"
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
+      KC_HTTP_ENABLED: "true"
+      KC_DB: dev-file
+    command: start-dev --import-realm
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/realms/pricing/.well-known/openid-configuration > /dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+  # ─── Python FastAPI Backend ───────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://pricing:pricing@postgres:5432/pricing
+      # Tokens have iss = http://localhost:8080/realms/pricing (browser-visible URL)
+      OIDC_ISSUER: http://localhost:8080/realms/pricing
+      # Backend fetches JWKS via internal Docker network
+      OIDC_JWKS_URL: http://keycloak:8080/realms/pricing/protocol/openid-connect/certs
+      OIDC_AUDIENCE: pricing-app
+      CORS_ORIGINS: '["http://localhost:3000","http://localhost"]'
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+
+  # ─── React Frontend ───────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_KEYCLOAK_URL: http://localhost:8080
+        VITE_KEYCLOAK_REALM: pricing
+        VITE_KEYCLOAK_CLIENT_ID: pricing-app
+        VITE_API_URL: http://localhost:8000
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
